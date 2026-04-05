@@ -1,8 +1,8 @@
 # Data
-data/
+/data/
 
 # Models
-models/
+/models/
 *.pt
 *.pth
 *.ckpt
