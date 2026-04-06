@@ -24,4 +24,4 @@ jobs:
         run: poetry check --lock
 
       - name: Install dependencies
-        run: poetry install
+        run: poetry install --no-root
