@@ -1,4 +1,4 @@
-name: Check Requirements Consistency
+name: Validate Dependencies
 
 on:
   push:
@@ -20,11 +20,8 @@ jobs:
       - name: Install Poetry
         run: pip install poetry
 
+      - name: Validate lock file is up to date
+        run: poetry check --lock
+
       - name: Install dependencies
         run: poetry install
-
-      - name: Re-export requirements
-        run: poetry export -f requirements.txt --without-hashes -o new_requirements.txt
-
-      - name: Compare requirements
-        run: diff requirements.txt new_requirements.txt

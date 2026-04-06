@@ -22,8 +22,7 @@ image_captioning_with_vmamba/
 │   │   └── predict.py
 │   └── __init__.py
 ├── pyproject.toml         # Project metadata and dependencies (Poetry)
-├── requirements.txt       # Exported dependencies (for pip/Docker compatibility)
-├── poetry.lock            # lock file to view the dependencies log
+├── poetry.lock            # Exact dependency versions — always commit this
 └── README.md
 ```
 
@@ -31,7 +30,7 @@ image_captioning_with_vmamba/
 
 ## Setup & Installation
 
-This project uses **Poetry** for dependency management. A `requirements.txt` is also maintained for compatibility with pip-based environments (e.g. Docker, CI).
+This project uses **Poetry** for dependency management.
 
 ### Prerequisites
 
@@ -50,21 +49,11 @@ pip install poetry
 poetry install
 ```
 
-This creates a virtual environment automatically and installs all dependencies pinned in `poetry.lock`.
-
-> If you prefer using a plain virtual environment with pip instead:
->
-> ```bash
-> python -m venv venv
-> source venv/bin/activate      # On Windows: venv\Scripts\activate
-> pip install -r requirements.txt
-> ```
+Poetry will automatically create a virtual environment and install all dependencies at the exact versions pinned in `poetry.lock`.
 
 ---
 
 ## Updating Dependencies
-
-We use Poetry as the source of truth for dependencies. After adding or changing any package, you must regenerate `requirements.txt` so both stay in sync.
 
 ### 1. Add a new package
 
@@ -75,21 +64,19 @@ poetry add <package-name>
 poetry add --group dev <package-name>
 ```
 
-### 2. Sync `requirements.txt`
-
-After any dependency change, regenerate `requirements.txt`:
+### 2. Remove a package
 
 ```bash
-poetry export -f requirements.txt --without-hashes -o requirements.txt
+poetry remove <package-name>
 ```
 
-### 3. Commit both files
+### 3. Commit the changes
 
-Always commit `pyproject.toml`, `poetry.lock`, and `requirements.txt` together:
+Always commit `pyproject.toml` and `poetry.lock` together:
 
 ```bash
-git add pyproject.toml poetry.lock requirements.txt
+git add pyproject.toml poetry.lock
 git commit -m "chore: update dependencies"
 ```
 
-> **Important:** Never edit `requirements.txt` by hand — it is auto-generated from Poetry. All dependency changes should go through `pyproject.toml` via `poetry add` or `poetry remove`.
+> **Important:** Never edit `pyproject.toml` or `poetry.lock` by hand. Always use `poetry add` / `poetry remove` so the lock file stays consistent.
