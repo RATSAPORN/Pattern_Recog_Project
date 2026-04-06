@@ -46,10 +46,10 @@ pip install poetry
 ### Install dependencies
 
 ```bash
-poetry install
+poetry install --no-root
 ```
 
-Poetry will automatically create a virtual environment and install all dependencies at the exact versions pinned in `poetry.lock`.
+Poetry will automatically create a virtual environment and install all dependencies at the exact versions pinned in `poetry.lock`. The `--no-root` flag skips installing the project itself as a package, which is not needed for this ML project.
 
 ---
 
