@@ -1,6 +1,5 @@
 - to install requirment use this command in venv: pip install -r requirements.txt
-- after implement please ensure to use this command for update requirment:
-  poetry export -f requirements.txt > requirements.txt
+- after implement please ensure to use this command for update requirment: pip freeze > requirements.txt
 
 ```bash
 image_captioning_with_vmamba/
