@@ -17,3 +17,7 @@ packages = [{include = "image_captioning_with_vmamba", from = "src"}]
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+# Add a fake package to pyproject.toml without running poetry lock
+[tool.poetry.dependencies]
+fake-package-that-does-not-exist = "^1.0.0"
