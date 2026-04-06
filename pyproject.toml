@@ -1,6 +1,7 @@
 [project]
 name = "image-captioning-with-vmamba"
 version = "0.1.0"
+packages = []  
 description = ""
 authors = [
     {name = "RATSAPORN",email = "rodolf8680@gmail.com"}
