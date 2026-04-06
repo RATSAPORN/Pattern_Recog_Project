@@ -1,0 +1,35 @@
+name: Check Requirements Consistency
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Clone repo
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      # 3. Install dependencies from repo
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # 4. Re-freeze dependencies
+      - name: Re-freeze dependencies (clean)
+        run: |
+          poetry export -f requirements.txt > new_requirements.txt
+
+      # 5. Compare files
+      - name: Compare requirements
+        run: |
+          diff requirements.txt new_requirements.txt
