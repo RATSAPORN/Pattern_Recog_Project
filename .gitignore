@@ -1,6 +1,8 @@
 # Data
 /data/
 
+/.vscode/
+
 # Models
 /models/
 *.pt
