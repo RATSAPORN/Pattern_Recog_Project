@@ -1689,6 +1689,6 @@ def vanilla_vmamba_small(pretrained=False, **kwargs):
         use_checkpoint=False, posembed=False, imgsize=224,
     )
     if pretrained:
-        model.load_state_dict(load_checkpoint("https://github.com/MzeroMiko/VMamba/releases/download/%23v0cls/vssmsmall_dp03_ckpt_epoch_238.pth"))
+        model.load_state_dict(load_checkpoint("https://github.com/MzeroMiko/VMamba/releases/download/%23v0cls/vssmsmall_dp03_ckpt_epoch_238.pth"), strict=False)
     return model
 
