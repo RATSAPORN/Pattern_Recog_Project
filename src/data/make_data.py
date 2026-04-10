@@ -20,12 +20,12 @@ DATASETS = {
         "extract_path": os.path.join(DATA_DIR, "mscoco")
     },
     # "MSCOCO_Train_Images": {
-    #     "url": "http://images.cocodataset.org/zips/train2014.zip",
-    #     "extract_path": os.path.join(DATA_DIR, "mscoco", "images")
+    #    "url": "http://images.cocodataset.org/zips/train2014.zip",
+    #     "extract_path": os.path.join(DATA_DIR, "mscoco", "images", "train")
     # }, ## 13GB file size !!
     # "MSCOCO_Val_Images": {
-    #     "url": "http://images.cocodataset.org/zips/val2014.zip",
-    #     "extract_path": os.path.join(DATA_DIR, "mscoco", "images")
+    #    "url": "http://images.cocodataset.org/zips/val2014.zip",
+    #     "extract_path": os.path.join(DATA_DIR, "mscoco", "images", "val")
     # } ## 6GB file size !!
 }
 
