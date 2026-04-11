@@ -21,7 +21,7 @@ dependencies = [
 mamba = ["mamba-ssm>=2.0.0"]
 
 [tool.poetry]
-packages = [{include = "image_captioning_with_vmamba", from = "src"}]
+packages = [{include = "models", from = "src"}]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
