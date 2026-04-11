@@ -2,7 +2,7 @@ import os
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
-from dataset import CaptionDataset
+from src.data.dataset import CaptionDataset
 
 
 def get_flickr8k_dataloaders(
