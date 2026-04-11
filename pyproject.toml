@@ -12,7 +12,13 @@ dependencies = [
     "torch>=2.0.0",
     "timm>=0.9.0",
     "torchvision (>=0.26.0,<0.27.0)",
+    "pycocoevalcap>=1.2",
 ]
+
+# mamba-ssm requires Linux + NVIDIA GPU + CUDA — install manually on compatible hardware:
+#   pip install mamba-ssm --no-build-isolation
+[project.optional-dependencies]
+mamba = ["mamba-ssm>=2.0.0"]
 
 [tool.poetry]
 packages = [{include = "image_captioning_with_vmamba", from = "src"}]
