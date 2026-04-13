@@ -28,6 +28,12 @@ except Exception:
     triton = _Stub()
     tl = _Stub()
 
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn as _mamba_selective_scan
+    WITH_MAMBA_SSM = True
+except ImportError:
+    WITH_MAMBA_SSM = False
+
 
 def cross_scan_fwd(x: torch.Tensor, in_channel_first=True, out_channel_first=True, scans=0):
     if in_channel_first:
@@ -645,6 +651,27 @@ def selective_scan_fn(
     oflex=True,
     backend=None,
 ):
+    # Use mamba_ssm CUDA kernel when available — replaces the slow Python for-loop
+    if WITH_MAMBA_SSM and u.is_cuda:
+        _, KCdim, _ = u.shape
+        K = B.shape[1]        # number of scan directions (4)
+        Cdim = KCdim // K
+        ys = []
+        for k in range(K):
+            u_k  = u    [:, k * Cdim:(k + 1) * Cdim, :]   # (B, C, L)
+            d_k  = delta[:, k * Cdim:(k + 1) * Cdim, :]   # (B, C, L)
+            A_k  = A    [k * Cdim:(k + 1) * Cdim, :]       # (C, N)
+            B_k  = B    [:, k, :, :]                        # (B, N, L)
+            C_k  = C    [:, k, :, :]                        # (B, N, L)
+            D_k  = D    [k * Cdim:(k + 1) * Cdim] if D is not None else None
+            db_k = delta_bias[k * Cdim:(k + 1) * Cdim] if delta_bias is not None else None
+            y_k = _mamba_selective_scan(
+                u_k, d_k, A_k, B_k, C_k,
+                D_k, delta_bias=db_k, delta_softplus=delta_softplus,
+            )
+            ys.append(y_k)
+        out = torch.cat(ys, dim=1)   # (B, KCdim, L)
+        return out if oflex else out.to(dtype=u.dtype)
     return selective_scan_torch(u, delta, A, B, C, D, delta_bias, delta_softplus, oflex)
 
 
