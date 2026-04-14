@@ -39,6 +39,8 @@ import argparse
 import time
 from collections import Counter
 
+from tqdm import tqdm
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -260,17 +262,18 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
     total_loss, n_tokens = 0.0, 0
 
     optimizer.zero_grad()
-    for step, (images, captions) in enumerate(loader):
+    pbar = tqdm(enumerate(loader), total=len(loader), desc="  train", leave=False)
+    for step, (images, captions) in pbar:
         images   = images.to(device)
-        captions = captions.to(device)           # (B, seq_len)
+        captions = captions.to(device)
 
-        logits  = model(images, captions)         # (B, seq-1, vocab)
-        targets = captions[:, 1:]                 # (B, seq-1)
+        logits  = model(images, captions)
+        targets = captions[:, 1:]
 
         loss = criterion(
             logits.reshape(-1, logits.size(-1)),
             targets.reshape(-1),
-        ) / grad_accum                            # scale loss for accumulation
+        ) / grad_accum
 
         loss.backward()
 
@@ -283,6 +286,8 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
             optimizer.step()
             optimizer.zero_grad()
 
+        pbar.set_postfix(loss=f"{total_loss / max(n_tokens, 1):.4f}")
+
     return total_loss / max(n_tokens, 1)
 
 
@@ -293,7 +298,7 @@ def validate(model, loader, criterion, vocab, device, max_len: int = 50):
     hypotheses, references = {}, {}
     img_idx = 0
 
-    for images, captions in loader:
+    for images, captions in tqdm(loader, desc="  valid", leave=False):
         images   = images.to(device)
         captions = captions.to(device)
 
