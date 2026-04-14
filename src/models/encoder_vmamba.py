@@ -622,18 +622,24 @@ def selective_scan_torch(
         delta = torch.nn.functional.softplus(delta)
 
     u, delta, A, B, C = u.float(), delta.float(), A.float(), B.float(), C.float()
-    B = B.view(Batch, K, 1, N, L).repeat(1, 1, Cdim, 1, 1).view(Batch, KCdim, N, L)
-    C = C.view(Batch, K, 1, N, L).repeat(1, 1, Cdim, 1, 1).view(Batch, KCdim, N, L)
-    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
-    deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+    # Reshape A for per-direction computation: (K, Cdim, N)
+    A_k = A.view(K, Cdim, N)
 
-    x = A.new_zeros((Batch, KCdim, N))
+    x = A.new_zeros((Batch, K, Cdim, N))
     ys = []
     for i in range(L):
-        x = deltaA[:, :, i, :] * x + deltaB_u[:, :, i, :]
-        y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
-        ys.append(y)
-    y = torch.stack(ys, dim=2)
+        # Per-step: tensors are (B, K, Cdim, N) — avoids pre-allocating (B, KCdim, L, N)
+        d_i = delta[:, :, i].view(Batch, K, Cdim)          # (B, K, Cdim)
+        u_i = u   [:, :, i].view(Batch, K, Cdim)           # (B, K, Cdim)
+        B_i = B[:, :, :, i]                                 # (B, K, N)
+        C_i = C[:, :, :, i]                                 # (B, K, N)
+
+        dA  = torch.exp(d_i.unsqueeze(-1) * A_k)           # (B, K, Cdim, N)
+        dBu = d_i.unsqueeze(-1) * B_i.unsqueeze(2) * u_i.unsqueeze(-1)  # (B, K, Cdim, N)
+        x   = dA * x + dBu                                  # (B, K, Cdim, N)
+        y   = (x * C_i.unsqueeze(2)).sum(dim=-1)            # (B, K, Cdim)
+        ys.append(y.view(Batch, KCdim))
+    y = torch.stack(ys, dim=2)                              # (B, KCdim, L)
     
     out = y if D is None else y + u * D.unsqueeze(-1)
     return out if oflex else out.to(dtype=dtype_in)
