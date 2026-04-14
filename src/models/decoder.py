@@ -1,8 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba_ssm import Mamba
-from mamba_ssm import Mamba3
+try:
+    from mamba_ssm import Mamba, Mamba3
+except ImportError:
+    class Mamba(object):
+        def __init__(self, *args, **kwargs):
+            raise ImportError("mamba_ssm is required for MambaDecoder. Install with: pip install mamba-ssm --no-build-isolation")
+    Mamba3 = Mamba
 
 class PureTDecoderBlock(nn.Module):
     def __init__(self, dim=512, num_heads=8, dropout=0.1):
