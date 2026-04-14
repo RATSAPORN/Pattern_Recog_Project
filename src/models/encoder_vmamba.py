@@ -1763,3 +1763,23 @@ def vanilla_vmamba_slim(pretrained=False, **kwargs):
     model = VSSM(depths=[2, 2, 6, 2], drop_path_rate=0.2, **cfg)
     return model
 
+
+@register_model
+def vanilla_vmamba_slim_tiny(pretrained=False, **kwargs):
+    """Smallest+fastest VMamba for RTX 4070/3090.
+
+    Combines fewest blocks (tiny) with thinnest neurons (slim):
+      depths     : [1,1,3,1]  — 6 blocks total
+      ssm_ratio  : 1.0        — half inner dim (d_inner = d_model)
+      ssm_d_state: 8          — half SSM state size
+
+    Output: (B, 7, 7, 768) — same encoder_dim=768, no other code changes needed.
+    Speed: ~10-15x faster per epoch than vmamba_small.
+    Note: trains from scratch (no compatible pretrained weights).
+    """
+    if pretrained:
+        warnings.warn("vmamba_slim_tiny has no compatible pretrained weights. Training from scratch.")
+    cfg = {**_VSSM_BASE_CFG, "ssm_ratio": 1.0, "ssm_d_state": 8}
+    model = VSSM(depths=[1, 1, 3, 1], drop_path_rate=0.1, **cfg)
+    return model
+
