@@ -1736,9 +1736,10 @@ def vanilla_vmamba_small_fast(pretrained=False, **kwargs):
 
 
 @register_model
-def vanilla_vmamba_tiny(pretrained=False, **kwargs):
+def vanilla_vmamba_tiny(pretrained=False, use_checkpoint=False, **kwargs):
     """Tiny VMamba: depths=[1,1,3,1], output (B,7,7,768). ~6x faster than full."""
-    model = VSSM(depths=[1, 1, 3, 1], drop_path_rate=0.2, **_VSSM_BASE_CFG)
+    cfg = {**_VSSM_BASE_CFG, "use_checkpoint": use_checkpoint}
+    model = VSSM(depths=[1, 1, 3, 1], drop_path_rate=0.2, **cfg)
     if pretrained:
         model.load_state_dict(load_checkpoint(_VMAMBA_SMALL_URL), strict=False)
     return model

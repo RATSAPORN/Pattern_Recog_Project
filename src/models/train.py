@@ -53,7 +53,7 @@ from src.data.build_features import get_flickr8k_dataloaders, get_mscoco_dataloa
 
 
 # ─── Encoder / Decoder factories (shared with predict.py) ────────────────────
-def build_encoder(name: str):
+def build_encoder(name: str, use_checkpoint: bool = False):
     """Returns (encoder, encoder_dim)."""
     if name == "vit_base":
         enc = vit_base_pretrained(return_patch_tokens=True)
@@ -66,7 +66,7 @@ def build_encoder(name: str):
     if name == "vmamba_small_fast":
         return vanilla_vmamba_small_fast(pretrained=True), 768
     if name == "vmamba_tiny":
-        return vanilla_vmamba_tiny(pretrained=True), 768
+        return vanilla_vmamba_tiny(pretrained=True, use_checkpoint=use_checkpoint), 768
     if name == "vmamba_slim":
         return vanilla_vmamba_slim(pretrained=False), 768
     if name == "vmamba_slim_tiny":
@@ -164,9 +164,9 @@ class CaptioningModel(nn.Module):
     def __init__(self, encoder_name: str, decoder_name: str,
                  vocab_size: int, decoder_dim: int = 512,
                  num_layers: int = 3, max_len: int = 50,
-                 freeze_encoder: bool = True):
+                 freeze_encoder: bool = True, use_checkpoint: bool = False):
         super().__init__()
-        self.encoder, encoder_dim = build_encoder(encoder_name)
+        self.encoder, encoder_dim = build_encoder(encoder_name, use_checkpoint=use_checkpoint)
         self.decoder = build_decoder(decoder_name, vocab_size, encoder_dim,
                                      decoder_dim, num_layers, max_len)
         self.proj = nn.Linear(encoder_dim, decoder_dim)
@@ -254,12 +254,13 @@ def compute_metrics(hypotheses: dict, references: dict) -> dict:
 
 
 # ─── Training / Validation ────────────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, criterion, device, vocab):
+def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1):
     model.train()
     model.encoder.eval()  # keep encoder in eval (frozen BN / dropout)
     total_loss, n_tokens = 0.0, 0
 
-    for images, captions in loader:
+    optimizer.zero_grad()
+    for step, (images, captions) in enumerate(loader):
         images   = images.to(device)
         captions = captions.to(device)           # (B, seq_len)
 
@@ -269,16 +270,18 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab):
         loss = criterion(
             logits.reshape(-1, logits.size(-1)),
             targets.reshape(-1),
-        )
+        ) / grad_accum                            # scale loss for accumulation
 
-        optimizer.zero_grad()
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-        optimizer.step()
 
         mask = targets != vocab.w2i[PAD]
-        total_loss += loss.item() * mask.sum().item()
+        total_loss += loss.item() * grad_accum * mask.sum().item()
         n_tokens   += mask.sum().item()
+
+        if (step + 1) % grad_accum == 0 or (step + 1) == len(loader):
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
     return total_loss / max(n_tokens, 1)
 
@@ -347,7 +350,11 @@ def main():
     parser.add_argument("--max_len",     type=int,   default=50)
     parser.add_argument("--min_freq",    type=int,   default=2)
     parser.add_argument("--workers",     type=int,   default=2)
-    parser.add_argument("--freeze_encoder", action="store_true", default=True)
+    parser.add_argument("--freeze_encoder",  action="store_true", default=True)
+    parser.add_argument("--grad_checkpoint", action="store_true", default=False,
+                        help="Gradient checkpointing in VMamba encoder — reduces VRAM ~40%")
+    parser.add_argument("--grad_accum",      type=int, default=1,
+                        help="Accumulate gradients over N steps — simulates larger batch size")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -412,6 +419,7 @@ def main():
         num_layers=args.num_layers,
         max_len=args.max_len,
         freeze_encoder=args.freeze_encoder,
+        use_checkpoint=args.grad_checkpoint,
     ).to(device)
 
     start_epoch = 0
@@ -447,7 +455,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab, grad_accum=args.grad_accum)
         val_loss, metrics = validate(model, val_loader, criterion, vocab, device, args.max_len)
         scheduler.step()
 
