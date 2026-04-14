@@ -47,7 +47,7 @@ from torchvision import transforms
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 from src.models.encoder_vit import vit_base_pretrained, vit_small_pretrained
-from src.models.encoder_vmamba import vanilla_vmamba_small
+from src.models.encoder_vmamba import vanilla_vmamba_small, vanilla_vmamba_small_fast, vanilla_vmamba_tiny, vanilla_vmamba_slim
 from src.models.decoder import PureTDecoder, MambaDecoder, Mamba3Decoder
 from src.data.build_features import get_flickr8k_dataloaders, get_mscoco_dataloaders
 
@@ -62,9 +62,14 @@ def build_encoder(name: str):
         enc = vit_small_pretrained(return_patch_tokens=True)
         return enc, enc.embed_dim                          # 384
     if name == "vmamba_small":
-        enc = vanilla_vmamba_small(pretrained=True)
-        return enc, 768
-    raise ValueError(f"Unknown encoder: {name!r}. Choose: vit_base | vit_small | vmamba_small")
+        return vanilla_vmamba_small(pretrained=True), 768
+    if name == "vmamba_small_fast":
+        return vanilla_vmamba_small_fast(pretrained=True), 768
+    if name == "vmamba_tiny":
+        return vanilla_vmamba_tiny(pretrained=True), 768
+    if name == "vmamba_slim":
+        return vanilla_vmamba_slim(pretrained=False), 768   # no pretrained — trains from scratch
+    raise ValueError(f"Unknown encoder: {name!r}. Choose: vit_base | vit_small | vmamba_small | vmamba_small_fast | vmamba_tiny | vmamba_slim")
 
 
 def build_decoder(name: str, vocab_size: int, encoder_dim: int,
@@ -315,7 +320,7 @@ def validate(model, loader, criterion, vocab, device, max_len: int = 50):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--encoder",     choices=["vit_base", "vit_small", "vmamba_small"],
+    parser.add_argument("--encoder",     choices=["vit_base", "vit_small", "vmamba_small", "vmamba_small_fast", "vmamba_tiny", "vmamba_slim"],
                         default="vit_base")
     parser.add_argument("--decoder",     choices=["transformer", "mamba", "mamba3"],
                         default="transformer")

@@ -1702,20 +1702,64 @@ def load_checkpoint(path="", key="model"):
     return checkpoint[key]
 
 
+_VMAMBA_SMALL_URL = "https://github.com/MzeroMiko/VMamba/releases/download/%23v0cls/vssmsmall_dp03_ckpt_epoch_238.pth"
+
+_VSSM_BASE_CFG = dict(
+    dims=96, patch_size=4, in_chans=3,
+    ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto", ssm_act_layer="silu",
+    ssm_conv=3, ssm_conv_bias=True, ssm_drop_rate=0.0,
+    ssm_init="v0", forward_type="v0",
+    mlp_ratio=0.0, mlp_act_layer="gelu", mlp_drop_rate=0.0, gmlp=False,
+    patch_norm=True, norm_layer="ln",
+    downsample_version="v1", patchembed_version="v1",
+    use_checkpoint=False, posembed=False, imgsize=224,
+)
+
+
 @register_model
 def vanilla_vmamba_small(pretrained=False, **kwargs):
-    model = VSSM(
-        depths=[2, 2, 27, 2], dims=96, drop_path_rate=0.3,
-        patch_size=4, in_chans=3,
-        ssm_d_state=16, ssm_ratio=2.0, ssm_dt_rank="auto", ssm_act_layer="silu",
-        ssm_conv=3, ssm_conv_bias=True, ssm_drop_rate=0.0,
-        ssm_init="v0", forward_type="v0",
-        mlp_ratio=0.0, mlp_act_layer="gelu", mlp_drop_rate=0.0, gmlp=False,
-        patch_norm=True, norm_layer="ln",
-        downsample_version="v1", patchembed_version="v1",
-        use_checkpoint=False, posembed=False, imgsize=224,
-    )
+    """Full VMamba-Small: depths=[2,2,27,2], output (B,7,7,768). Slow — 33 VSS blocks."""
+    model = VSSM(depths=[2, 2, 27, 2], drop_path_rate=0.3, **_VSSM_BASE_CFG)
     if pretrained:
-        model.load_state_dict(load_checkpoint("https://github.com/MzeroMiko/VMamba/releases/download/%23v0cls/vssmsmall_dp03_ckpt_epoch_238.pth"), strict=False)
+        model.load_state_dict(load_checkpoint(_VMAMBA_SMALL_URL), strict=False)
+    return model
+
+
+@register_model
+def vanilla_vmamba_small_fast(pretrained=False, **kwargs):
+    """Fast VMamba-Small: depths=[2,2,6,2], output (B,7,7,768). ~3x faster than full."""
+    model = VSSM(depths=[2, 2, 6, 2], drop_path_rate=0.3, **_VSSM_BASE_CFG)
+    if pretrained:
+        # Load pretrained weights — stage-3 blocks 0-5 apply, 6-26 are skipped
+        model.load_state_dict(load_checkpoint(_VMAMBA_SMALL_URL), strict=False)
+    return model
+
+
+@register_model
+def vanilla_vmamba_tiny(pretrained=False, **kwargs):
+    """Tiny VMamba: depths=[1,1,3,1], output (B,7,7,768). ~6x faster than full."""
+    model = VSSM(depths=[1, 1, 3, 1], drop_path_rate=0.2, **_VSSM_BASE_CFG)
+    if pretrained:
+        model.load_state_dict(load_checkpoint(_VMAMBA_SMALL_URL), strict=False)
+    return model
+
+
+@register_model
+def vanilla_vmamba_slim(pretrained=False, **kwargs):
+    """Slim VMamba for fast training on RTX 4070/3090.
+
+    Changes vs vmamba_small:
+      depths    : [2,2,27,2] → [2,2,6,2]   (12 blocks vs 33)
+      ssm_ratio : 2.0        → 1.0          (half inner dim d_inner)
+      ssm_d_state: 16        → 8            (half SSM state size)
+
+    Output: (B, 7, 7, 768) — same as vmamba_small, no other code changes needed.
+    Speed: ~5-8x faster per epoch than vmamba_small.
+    Note: trains from scratch (pretrained weights incompatible with smaller d_state).
+    """
+    if pretrained:
+        warnings.warn("vmamba_slim uses smaller ssm_d_state=8 — pretrained weights are incompatible. Training from scratch.")
+    cfg = {**_VSSM_BASE_CFG, "ssm_ratio": 1.0, "ssm_d_state": 8}
+    model = VSSM(depths=[2, 2, 6, 2], drop_path_rate=0.2, **cfg)
     return model
 

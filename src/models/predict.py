@@ -44,7 +44,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
 
 from src.models.encoder_vit import vit_base_pretrained, vit_small_pretrained
-from src.models.encoder_vmamba import vanilla_vmamba_small
+from src.models.encoder_vmamba import vanilla_vmamba_small, vanilla_vmamba_small_fast, vanilla_vmamba_tiny, vanilla_vmamba_slim
 from src.models.decoder import PureTDecoder, MambaDecoder, Mamba3Decoder
 
 # ─── Special tokens (must match training) ─────────────────────────────────────
@@ -90,9 +90,14 @@ def build_encoder(name: str) -> tuple[nn.Module, int]:
         enc = vit_small_pretrained(return_patch_tokens=True)  # (B, 196, 384)
         return enc, enc.embed_dim
     if name == "vmamba_small":
-        enc = vanilla_vmamba_small(pretrained=False)           # (B, 7, 7, 768)
-        return enc, 768
-    raise ValueError(f"Unknown encoder: {name!r}. Choose: vit_base | vit_small | vmamba_small")
+        return vanilla_vmamba_small(pretrained=False), 768
+    if name == "vmamba_small_fast":
+        return vanilla_vmamba_small_fast(pretrained=False), 768
+    if name == "vmamba_tiny":
+        return vanilla_vmamba_tiny(pretrained=False), 768
+    if name == "vmamba_slim":
+        return vanilla_vmamba_slim(pretrained=False), 768
+    raise ValueError(f"Unknown encoder: {name!r}. Choose: vit_base | vit_small | vmamba_small | vmamba_small_fast | vmamba_tiny | vmamba_slim")
 
 
 # ─── Decoder factory ──────────────────────────────────────────────────────────
@@ -233,7 +238,7 @@ def main():
     parser.add_argument("--checkpoint", required=True,
                         help="Path to saved .pt file (models/best.pt)")
     parser.add_argument("--encoder",    default="vit_base",
-                        choices=["vit_base", "vit_small", "vmamba_small"])
+                        choices=["vit_base", "vit_small", "vmamba_small", "vmamba_small_fast", "vmamba_tiny", "vmamba_slim"])
     parser.add_argument("--decoder",    default="transformer",
                         choices=["transformer", "mamba", "mamba3"])
     parser.add_argument("--vocab",      default=None,
