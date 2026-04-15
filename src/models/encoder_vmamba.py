@@ -1510,6 +1510,7 @@ class VSSM(nn.Module):
                 _SS2D=_SS2D,
             ))
 
+        self.norm = LayerNorm(self.num_features)
         self.apply(self._init_weights)
 
     @staticmethod
@@ -1655,6 +1656,7 @@ class VSSM(nn.Module):
             x = x + pos_embed
         for layer in self.layers:
             x = layer(x)
+        x = self.norm(x)  # final norm — mirrors the norm in the original classifier head
         return x
 
     # used to load ckpt from previous training code
