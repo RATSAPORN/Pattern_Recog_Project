@@ -223,13 +223,15 @@ class CaptioningModel(nn.Module):
 
 
 # ─── Evaluation helpers ───────────────────────────────────────────────────────
-def compute_metrics(hypotheses: dict, references: dict) -> dict:
+def compute_metrics(hypotheses: dict, references: dict, bertscore: bool = False) -> dict:
     """
     Compute BLEU-1..4, ROUGE-L, METEOR, CIDEr using pycocoevalcap.
+    Optionally compute BERTScore F1 (semantic similarity).
 
     Args:
         hypotheses : {image_id: [predicted_caption]}
         references : {image_id: [ref1, ref2, ...]}
+        bertscore  : if True, also compute BERTScore F1 (requires bert-score package)
     Returns:
         dict of metric name → score
     """
@@ -253,6 +255,30 @@ def compute_metrics(hypotheses: dict, references: dict) -> dict:
                 results[name] = round(s, 4)
         else:
             results[names[0]] = round(score, 4)
+
+    if bertscore:
+        try:
+            from bert_score import score as bert_score_fn
+            # BERTScore needs flat lists; for multi-reference images use the first reference
+            ids   = sorted(hypotheses.keys())
+            # Use all references: repeat each prediction for every reference, then average
+            refs_flat, preds_flat = [], []
+            for i in ids:
+                for ref in references[i]:
+                    preds_flat.append(hypotheses[i][0])
+                    refs_flat.append(ref)
+            _, _, F1 = bert_score_fn(preds_flat, refs_flat,
+                                     lang="en", verbose=False)
+            # Average F1 per image (each image may have multiple refs)
+            per_image_f1, idx = [], 0
+            for i in ids:
+                n = len(references[i])
+                per_image_f1.append(F1[idx:idx + n].mean().item())
+                idx += n
+            results["BERTScore-F1"] = round(sum(per_image_f1) / len(per_image_f1), 4)
+        except ImportError:
+            print("BERTScore skipped — run: pip install bert-score")
+
     return results
 
 
