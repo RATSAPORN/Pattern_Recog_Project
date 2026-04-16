@@ -201,6 +201,11 @@ def load_model(checkpoint_path: str, encoder_name: str, decoder_name: str,
     """
     Build model from args, load weights from checkpoint, return (model, vocab).
     """
+    try:
+        import numpy._core.multiarray
+        torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+    except Exception:
+        pass
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     print(f"Loaded checkpoint: {checkpoint_path}")
     if "metrics" in ckpt:

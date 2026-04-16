@@ -42,6 +42,7 @@ from collections import Counter
 from tqdm import tqdm
 
 import torch
+from torch.amp import GradScaler
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -256,7 +257,7 @@ def compute_metrics(hypotheses: dict, references: dict) -> dict:
 
 
 # ─── Training / Validation ────────────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1):
+def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1, scaler=None):
     model.train()
     model.encoder.eval()  # keep encoder in eval (frozen BN / dropout)
     total_loss, n_tokens = 0.0, 0
@@ -267,23 +268,32 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
         images   = images.to(device)
         captions = captions.to(device)
 
-        logits  = model(images, captions)
-        targets = captions[:, 1:]
+        with torch.amp.autocast("cuda", enabled=scaler is not None):
+            logits  = model(images, captions)
+            targets = captions[:, 1:]
+            loss = criterion(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+            ) / grad_accum
 
-        loss = criterion(
-            logits.reshape(-1, logits.size(-1)),
-            targets.reshape(-1),
-        ) / grad_accum
-
-        loss.backward()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         mask = targets != vocab.w2i[PAD]
         total_loss += loss.item() * grad_accum * mask.sum().item()
         n_tokens   += mask.sum().item()
 
         if (step + 1) % grad_accum == 0 or (step + 1) == len(loader):
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
             optimizer.zero_grad()
 
         pbar.set_postfix(loss=f"{total_loss / max(n_tokens, 1):.4f}")
@@ -432,6 +442,11 @@ def main():
     ckpt        = {}
 
     if args.checkpoint:
+        try:
+            import numpy._core.multiarray
+            torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+        except Exception:
+            pass
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         start_epoch = ckpt.get("epoch", 0) + 1
@@ -456,11 +471,14 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler"])
         print("  Optimizer and scheduler state restored.")
 
+    # ── Mixed precision scaler (created once, persists across epochs) ────────
+    scaler = GradScaler("cuda") if device.type == "cuda" else None
+
     # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab, grad_accum=args.grad_accum)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab, grad_accum=args.grad_accum, scaler=scaler)
         val_loss, metrics = validate(model, val_loader, criterion, vocab, device, args.max_len)
         scheduler.step()
 
