@@ -201,7 +201,7 @@ def load_model(checkpoint_path: str, encoder_name: str, decoder_name: str,
     """
     Build model from args, load weights from checkpoint, return (model, vocab).
     """
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     print(f"Loaded checkpoint: {checkpoint_path}")
     if "metrics" in ckpt:
         m = ckpt["metrics"]

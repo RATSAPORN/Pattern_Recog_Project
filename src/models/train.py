@@ -432,7 +432,7 @@ def main():
     ckpt        = {}
 
     if args.checkpoint:
-        ckpt = torch.load(args.checkpoint, map_location=device)
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         start_epoch = ckpt.get("epoch", 0) + 1
         best_cider  = ckpt.get("cider", 0.0)
