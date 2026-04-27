@@ -35,6 +35,7 @@ Evaluation: BLEU-1..4, ROUGE-L, METEOR, CIDEr via pycocoevalcap.
 import os
 import sys
 import json
+import math
 import argparse
 import time
 from collections import Counter
@@ -170,17 +171,31 @@ class CaptioningModel(nn.Module):
                  freeze_encoder: bool = True, use_checkpoint: bool = False):
         super().__init__()
         self.encoder, encoder_dim = build_encoder(encoder_name, use_checkpoint=use_checkpoint)
-        self.decoder = build_decoder(decoder_name, vocab_size, encoder_dim,
-                                     decoder_dim, num_layers, max_len)
+        # Decoder honors `use_checkpoint` too if it accepts the kwarg (PureTDecoder does).
+        try:
+            self.decoder = build_decoder(decoder_name, vocab_size, encoder_dim,
+                                         decoder_dim, num_layers, max_len)
+            if hasattr(self.decoder, "use_checkpoint"):
+                self.decoder.use_checkpoint = use_checkpoint
+        except TypeError:
+            self.decoder = build_decoder(decoder_name, vocab_size, encoder_dim,
+                                         decoder_dim, num_layers, max_len)
         self.proj = nn.Linear(encoder_dim, decoder_dim)
         self.decoder_name = decoder_name
+        self.freeze_encoder = freeze_encoder
 
         if freeze_encoder:
             for p in self.encoder.parameters():
                 p.requires_grad_(False)
 
     def _encode(self, images: torch.Tensor):
-        feats = self.encoder(images)
+        # When the encoder is frozen, run it in no_grad to skip autograd bookkeeping
+        # and avoid retaining encoder activations for backward.
+        if self.freeze_encoder:
+            with torch.no_grad():
+                feats = self.encoder(images)
+        else:
+            feats = self.encoder(images)
         if feats.dim() == 4:                              # VMamba: (B,H,W,C)
             B, H, W, C = feats.shape
             feats = feats.view(B, H * W, C)
@@ -223,15 +238,16 @@ class CaptioningModel(nn.Module):
 
 
 # ─── Evaluation helpers ───────────────────────────────────────────────────────
-def compute_metrics(hypotheses: dict, references: dict, bertscore: bool = False) -> dict:
+def compute_metrics(hypotheses: dict, references: dict, bertscore: bool = False, spice: bool = False) -> dict:
     """
     Compute BLEU-1..4, ROUGE-L, METEOR, CIDEr using pycocoevalcap.
-    Optionally compute BERTScore F1 (semantic similarity).
+    Optionally compute BERTScore F1 (semantic similarity) and SPICE.
 
     Args:
         hypotheses : {image_id: [predicted_caption]}
         references : {image_id: [ref1, ref2, ...]}
         bertscore  : if True, also compute BERTScore F1 (requires bert-score package)
+        spice      : if True, also compute SPICE (requires Java 8+ and src/models/spice/spice-1.0.jar)
     Returns:
         dict of metric name → score
     """
@@ -255,6 +271,18 @@ def compute_metrics(hypotheses: dict, references: dict, bertscore: bool = False)
                 results[name] = round(s, 4)
         else:
             results[names[0]] = round(score, 4)
+
+    if spice:
+        try:
+            from src.models.spice.spice import Spice
+            spice_scorer = Spice()
+            spice_score, _ = spice_scorer.compute_score(references, hypotheses)
+            results["SPICE"] = round(float(spice_score), 4)
+        except FileNotFoundError as e:
+            print(f"SPICE skipped — missing file: {e}. "
+                  f"Place spice-1.0.jar in src/models/spice/ and ensure Java 8+ is on PATH.")
+        except Exception as e:
+            print(f"SPICE skipped — {type(e).__name__}: {e}")
 
     if bertscore:
         try:
@@ -283,16 +311,16 @@ def compute_metrics(hypotheses: dict, references: dict, bertscore: bool = False)
 
 
 # ─── Training / Validation ────────────────────────────────────────────────────
-def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1, scaler=None):
+def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1, scaler=None, scheduler=None):
     model.train()
     model.encoder.eval()  # keep encoder in eval (frozen BN / dropout)
     total_loss, n_tokens = 0.0, 0
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(enumerate(loader), total=len(loader), desc="  train", leave=False)
     for step, (images, captions) in pbar:
-        images   = images.to(device)
-        captions = captions.to(device)
+        images   = images.to(device, non_blocking=True)
+        captions = captions.to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", enabled=scaler is not None):
             logits  = model(images, captions)
@@ -320,23 +348,26 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
             else:
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
 
-        pbar.set_postfix(loss=f"{total_loss / max(n_tokens, 1):.4f}")
+        lr = optimizer.param_groups[0]["lr"]
+        pbar.set_postfix(loss=f"{total_loss / max(n_tokens, 1):.4f}", lr=f"{lr:.2e}")
 
     return total_loss / max(n_tokens, 1)
 
 
-@torch.no_grad()
-def validate(model, loader, criterion, vocab, device, max_len: int = 50):
+@torch.inference_mode()
+def validate(model, loader, criterion, vocab, device, max_len: int = 50, spice: bool = False):
     model.eval()
     total_loss, n_tokens = 0.0, 0
     hypotheses, references = {}, {}
     img_idx = 0
 
     for images, captions in tqdm(loader, desc="  valid", leave=False):
-        images   = images.to(device)
-        captions = captions.to(device)
+        images   = images.to(device, non_blocking=True)
+        captions = captions.to(device, non_blocking=True)
 
         # Loss
         logits  = model(images, captions)
@@ -359,7 +390,7 @@ def validate(model, loader, criterion, vocab, device, max_len: int = 50):
             img_idx += 1
 
     val_loss = total_loss / max(n_tokens, 1)
-    metrics  = compute_metrics(hypotheses, references)
+    metrics  = compute_metrics(hypotheses, references, spice=spice)
     return val_loss, metrics
 
 
@@ -391,11 +422,21 @@ def main():
     parser.add_argument("--max_len",     type=int,   default=50)
     parser.add_argument("--min_freq",    type=int,   default=2)
     parser.add_argument("--workers",     type=int,   default=2)
-    parser.add_argument("--freeze_encoder",  action="store_true", default=True)
-    parser.add_argument("--grad_checkpoint", action="store_true", default=False,
-                        help="Gradient checkpointing in VMamba encoder — reduces VRAM ~40%")
+    parser.add_argument("--freeze_encoder",  action="store_true", default=False)
+    parser.add_argument("--grad_checkpoint", action=argparse.BooleanOptionalAction, default=True,
+                        help="Gradient checkpointing in VMamba encoder + transformer decoder layers — reduces VRAM ~40%. Disable with --no-grad_checkpoint.")
     parser.add_argument("--grad_accum",      type=int, default=1,
                         help="Accumulate gradients over N steps — simulates larger batch size")
+    parser.add_argument("--patience",        type=int, default=0,
+                        help="Early stopping: stop if CIDEr does not improve for N consecutive epochs. 0 disables.")
+    parser.add_argument("--min_delta",       type=float, default=0.0,
+                        help="Early stopping: minimum CIDEr improvement to count as progress.")
+    parser.add_argument("--spice",           action="store_true",
+                        help="Compute SPICE metric during validation (requires Java 8+ and src/models/spice/spice-1.0.jar).")
+    parser.add_argument("--warmup_epochs",   type=float, default=1.0,
+                        help="Linear LR warmup duration in epochs (fractional allowed, e.g. 0.5). 0 disables warmup.")
+    parser.add_argument("--lr_min",          type=float, default=1e-5,
+                        help="Final LR at the end of cosine decay.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -446,9 +487,11 @@ def main():
     raw_val.dataset.transform   = val_tf
 
     train_loader = DataLoader(raw_train.dataset, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.workers, collate_fn=collate, pin_memory=True)
+                              num_workers=args.workers, collate_fn=collate, pin_memory=True,
+                              drop_last=True, persistent_workers=args.workers > 0)
     val_loader   = DataLoader(raw_val.dataset,   batch_size=args.batch_size, shuffle=False,
-                              num_workers=args.workers, collate_fn=collate, pin_memory=True)
+                              num_workers=args.workers, collate_fn=collate, pin_memory=True,
+                              persistent_workers=args.workers > 0)
 
     # ── Model ───────────────────────────────────────────────────────────────
     print(f"Encoder: {args.encoder}  |  Decoder: {args.decoder}")
@@ -463,9 +506,10 @@ def main():
         use_checkpoint=args.grad_checkpoint,
     ).to(device)
 
-    start_epoch = 0
-    best_cider  = 0.0
-    ckpt        = {}
+    start_epoch       = 0
+    best_cider        = 0.0
+    epochs_no_improve = 0
+    ckpt              = {}
 
     if args.checkpoint:
         try:
@@ -475,27 +519,55 @@ def main():
             pass
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
-        start_epoch = ckpt.get("epoch", 0) + 1
-        best_cider  = ckpt.get("cider", 0.0)
+        start_epoch       = ckpt.get("epoch", 0) + 1
+        best_cider        = ckpt.get("cider", 0.0)
+        epochs_no_improve = ckpt.get("epochs_no_improve", 0)
         print(f"Loaded weights from {args.checkpoint}")
         print(f"  epoch={start_epoch}  best_CIDEr={best_cider:.4f}")
         if "metrics" in ckpt:
             m = ckpt["metrics"]
             print(f"  BLEU-4={m.get('BLEU-4',0):.4f}  METEOR={m.get('METEOR',0):.4f}  CIDEr={m.get('CIDEr',0):.4f}")
 
-    # ── Optimizer & Loss ────────────────────────────────────────────────────
+    # ── Optimizer & LR scheduler (per-step warmup + cosine) ─────────────────
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-5
+
+    steps_per_epoch = math.ceil(len(train_loader) / args.grad_accum)
+    total_steps     = steps_per_epoch * args.epochs
+    warmup_steps    = int(steps_per_epoch * args.warmup_epochs)
+    cosine_steps    = max(1, total_steps - warmup_steps)
+    print(f"LR schedule: warmup={warmup_steps} steps  cosine={cosine_steps} steps  "
+          f"({steps_per_epoch} steps/epoch × {args.epochs} epochs)")
+
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cosine_steps, eta_min=args.lr_min
     )
+    if warmup_steps > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+        )
+    else:
+        scheduler = cosine
+
     criterion = nn.CrossEntropyLoss(ignore_index=vocab.w2i[PAD])
 
     if args.checkpoint and "optimizer" in ckpt:
         optimizer.state_dict()  # init optimizer state before loading
         optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        print("  Optimizer and scheduler state restored.")
+        try:
+            scheduler.load_state_dict(ckpt["scheduler"])
+            print("  Optimizer and scheduler state restored.")
+        except (KeyError, ValueError, RuntimeError) as e:
+            # Old checkpoints used a per-epoch CosineAnnealingLR — state shape differs.
+            # Fast-forward the new step-based scheduler to the resumed epoch instead.
+            advance = start_epoch * steps_per_epoch
+            for _ in range(advance):
+                scheduler.step()
+            print(f"  Optimizer restored. Scheduler state incompatible ({type(e).__name__}); "
+                  f"fast-forwarded {advance} steps to epoch {start_epoch}.")
 
     # ── Mixed precision scaler (created once, persists across epochs) ────────
     scaler = GradScaler("cuda") if device.type == "cuda" else None
@@ -504,24 +576,30 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab, grad_accum=args.grad_accum, scaler=scaler)
-        val_loss, metrics = validate(model, val_loader, criterion, vocab, device, args.max_len)
-        scheduler.step()
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, vocab,
+                                 grad_accum=args.grad_accum, scaler=scaler, scheduler=scheduler)
+        val_loss, metrics = validate(model, val_loader, criterion, vocab, device, args.max_len, spice=args.spice)
 
         elapsed = time.time() - t0
+        spice_str = f" | SPICE={metrics['SPICE']:.4f}" if "SPICE" in metrics else ""
         print(
             f"Epoch {epoch+1:03d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
             f"BLEU-4={metrics.get('BLEU-4', 0):.4f} | "
             f"ROUGE-L={metrics.get('ROUGE-L', 0):.4f} | "
             f"METEOR={metrics.get('METEOR', 0):.4f} | "
-            f"CIDEr={metrics.get('CIDEr', 0):.4f} | "
+            f"CIDEr={metrics.get('CIDEr', 0):.4f}"
+            f"{spice_str} | "
             f"{elapsed:.0f}s"
         )
 
         cider = metrics.get("CIDEr", 0.0)
-        is_best = cider > best_cider
-        best_cider = max(cider, best_cider)
+        is_best = cider > best_cider + args.min_delta
+        if is_best:
+            best_cider = cider
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
         ckpt = {
             "epoch": epoch,
@@ -529,6 +607,7 @@ def main():
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "cider": best_cider,
+            "epochs_no_improve": epochs_no_improve,
             "metrics": metrics,
             "vocab_size": len(vocab),
             "vocab_path": args.vocab_path,
@@ -540,6 +619,10 @@ def main():
             best_path = os.path.join(args.save_dir, "best.pt")
             torch.save(ckpt, best_path)
             print(f"  ✓ New best CIDEr={best_cider:.4f}  saved → {best_path}")
+
+        if args.patience > 0 and epochs_no_improve >= args.patience:
+            print(f"  ⏹ Early stopping: CIDEr has not improved for {epochs_no_improve} epochs (patience={args.patience}). Best CIDEr={best_cider:.4f}")
+            break
 
 
 if __name__ == "__main__":
