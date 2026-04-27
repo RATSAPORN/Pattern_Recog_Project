@@ -68,7 +68,8 @@ class PureTDecoder(nn.Module):
         dim=512,
         num_heads=8,
         num_layers=3,
-        max_len=100
+        max_len=100,
+        use_checkpoint=False,
     ):
         super().__init__()
 
@@ -83,6 +84,7 @@ class PureTDecoder(nn.Module):
         ])
 
         self.fc = nn.Linear(dim, vocab_size)
+        self.use_checkpoint = use_checkpoint
 
     def forward(self, tgt, global_feat, memory):
 
@@ -93,7 +95,12 @@ class PureTDecoder(nn.Module):
         tgt_mask = self.generate_mask(x.size(1)).to(x.device)
 
         for layer in self.layers:
-            x = layer(x, global_feat, memory, tgt_mask)
+            if self.use_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(
+                    layer, x, global_feat, memory, tgt_mask, use_reentrant=False
+                )
+            else:
+                x = layer(x, global_feat, memory, tgt_mask)
 
         logits = self.fc(x)
 
