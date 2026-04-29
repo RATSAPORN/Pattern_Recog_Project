@@ -2,12 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 try:
-    from mamba_ssm import Mamba, Mamba3
+    from mamba_ssm import Mamba
 except ImportError:
-    class Mamba(object):
-        def __init__(self, *args, **kwargs):
+    class Mamba:
+        def __init__(self, *_, **_kw):
+            del _kw
             raise ImportError("mamba_ssm is required for MambaDecoder. Install with: pip install mamba-ssm --no-build-isolation")
-    Mamba3 = Mamba
+
+try:
+    from mamba_ssm import Mamba3
+except ImportError:
+    class Mamba3:
+        def __init__(self, *_, **_kw):
+            del _kw
+            raise ImportError("mamba_ssm>=2.3 with Mamba3 is required for Mamba3Decoder. Install with: pip install mamba-ssm --no-build-isolation")
 
 class PureTDecoderBlock(nn.Module):
     def __init__(self, dim=512, num_heads=8, dropout=0.1):
@@ -170,18 +178,58 @@ class MambaDecoder(nn.Module):
 
         return logits
 
+class Mamba3DecoderBlock(nn.Module):
+    """Mamba3 SSM + cross-attention with pre-norm residual connections.
+
+    Replaces the prior raw-Mamba3 stack: each block now has explicit residual
+    norms between sub-layers and a cross-attention path that lets text tokens
+    attend directly to the visual memory instead of relying on prefix
+    concatenation through a causal SSM.
+    """
+    def __init__(self, d_model=512, num_heads=8, d_state=64, headdim=128,
+                 is_mimo=False, mimo_rank=4, chunk_size=16,
+                 dropout=0.1, dtype=torch.bfloat16):
+        super().__init__()
+        self.norm_ssm = nn.LayerNorm(d_model, dtype=dtype)
+        self.mamba = Mamba3(
+            d_model=d_model,
+            d_state=d_state,
+            headdim=headdim,
+            is_mimo=is_mimo,
+            mimo_rank=mimo_rank,
+            chunk_size=chunk_size,
+            is_outproj_norm=True,
+            dtype=dtype,
+        )
+
+        self.norm_cross = nn.LayerNorm(d_model, dtype=dtype)
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout=dropout, batch_first=True, dtype=dtype
+        )
+
+    def forward(self, x, memory):
+        x = x + self.mamba(self.norm_ssm(x))
+        h = self.norm_cross(x)
+        attn_out, _ = self.cross_attn(h, memory, memory)
+        x = x + attn_out
+        return x
+
+
 class Mamba3Decoder(nn.Module):
     def __init__(
         self,
         vocab_size,
         encoder_dim=768,       # Default output dim of vanilla_vmamba_small
-        d_model=768,           # Dimension of Mamba-3
-        d_state=128,           # Mamba-3 state expansion
-        headdim=64,            # Mamba-3 headdim
+        d_model=512,           # Dimension of Mamba-3
+        num_heads=8,           # Cross-attention heads
+        d_state=64,            # Mamba-3 state expansion (was 128 — too large for this dataset size)
+        headdim=128,           # Mamba-3 headdim
         num_layers=6,          # Number of Mamba-3 blocks
-        is_mimo=True,          # Enable MIMO for complex tracking
+        is_mimo=False,         # Enable MIMO for complex tracking
         mimo_rank=4,
         chunk_size=16,
+        max_len=128,
+        dropout=0.1,
         dtype=torch.bfloat16,  # Mamba-3 is highly optimized for bf16
         pad_token_id=0         # Your tokenizer's padding token
     ):
@@ -191,76 +239,61 @@ class Mamba3Decoder(nn.Module):
         self.pad_token_id = pad_token_id
         self.dtype = dtype
 
-        # 1. Visual Feature Projection
-        # Maps the VMamba features to the Mamba-3 hidden dimension
         self.visual_proj = nn.Linear(encoder_dim, d_model, dtype=dtype)
+        self.visual_norm = nn.LayerNorm(d_model, dtype=dtype)
 
-        # 2. Text Embedding
         self.embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id, dtype=dtype)
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, max_len, d_model, dtype=dtype) * 0.02
+        )
 
-        # 3. The Mamba-3 Backbone (Stack of blocks)
         self.layers = nn.ModuleList([
-            Mamba3(
+            Mamba3DecoderBlock(
                 d_model=d_model,
+                num_heads=num_heads,
                 d_state=d_state,
                 headdim=headdim,
                 is_mimo=is_mimo,
                 mimo_rank=mimo_rank,
                 chunk_size=chunk_size,
-                is_outproj_norm=False,
+                dropout=dropout,
                 dtype=dtype,
             ) for _ in range(num_layers)
         ])
 
-        # 4. Final Layer Norm and Language Modeling Head
         self.norm_f = nn.LayerNorm(d_model, dtype=dtype)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, dtype=dtype)
 
         # Weight Tying: Share weights between embedding and output layer (improves training)
         self.lm_head.weight = self.embedding.weight
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
 
     def forward(self, image_features, text_input_ids):
         """
         Args:
-            image_features: Tensor from VMamba. Can be (B, C, H, W) or (B, num_patches, C).
+            image_features: Tensor from VMamba. Can be (B, H, W, C) or (B, num_patches, C).
             text_input_ids: Tensor of shape (B, seq_len) containing caption token IDs.
         Returns:
             logits: Tensor of shape (B, seq_len, vocab_size) predicting the NEXT word.
         """
-        # --- 1. Process Visual Features ---
         if image_features.dim() == 4:
-            # VMamba outputs (B, H, W, C). We just need to flatten H and W.
             B, H, W, C = image_features.shape
             image_features = image_features.view(B, H * W, C)
-        
-        # Cast to bf16 and project
+
         image_features = image_features.to(self.dtype)
-        vis_embeds = self.visual_proj(image_features) # (B, num_patches, d_model)
+        memory = self.visual_norm(self.visual_proj(image_features))  # (B, num_patches, d_model)
 
-        # --- 2. Process Text Features ---
-        text_embeds = self.embedding(text_input_ids)  # (B, seq_len, d_model)
+        text_embeds = self.embedding(text_input_ids)
+        text_embeds = text_embeds + self.pos_embedding[:, :text_embeds.size(1)]
 
-        # --- 3. Concatenate (Visual Prompting / Prefixing) ---
-        # We prepend the visual tokens to the text tokens.
-        # Shape becomes: (B, num_patches + seq_len, d_model)
-        hidden_states = torch.cat([vis_embeds, text_embeds], dim=1)
-
-        # --- 4. Pass through Mamba-3 Layers ---
+        hidden_states = text_embeds.to(device=image_features.device, dtype=self.dtype).contiguous()
         for layer in self.layers:
-            hidden_states = layer(hidden_states)
+            hidden_states = layer(hidden_states, memory)
 
         hidden_states = self.norm_f(hidden_states)
+        logits = self.lm_head(hidden_states)
 
-        # --- 5. Extract Text Logits ---
-        # Mamba-3 processed everything sequentially. 
-        # We only care about the outputs corresponding to the text tokens to compute CrossEntropyLoss.
-        num_patches = vis_embeds.size(1)
-        text_hidden_states = hidden_states[:, num_patches:, :] 
-
-        # Compute vocabulary logits
-        logits = self.lm_head(text_hidden_states) # (B, seq_len, vocab_size)
-
-        return logits.to(torch.float32) # Cast to float32 for stable loss calculation
+        return logits.to(torch.float32)
 
     @torch.no_grad()
     def generate(self, image_features, start_token_id, end_token_id, max_length=20):

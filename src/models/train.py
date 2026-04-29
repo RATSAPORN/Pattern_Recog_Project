@@ -43,10 +43,18 @@ from collections import Counter
 from tqdm import tqdm
 
 import torch
-from torch.amp import GradScaler
+
+if not hasattr(torch, 'uint16'):
+    torch.uint16 = torch.int16
+    torch.uint32 = torch.int32
+    torch.uint64 = torch.int64
+from torch.cuda.amp import GradScaler
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
+
+
+
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, ROOT)
@@ -87,8 +95,13 @@ def build_decoder(name: str, vocab_size: int, encoder_dim: int,
         return MambaDecoder(vocab_size=vocab_size, dim=decoder_dim,
                             num_layers=num_layers, max_len=max_len)
     if name == "mamba3":
-        return Mamba3Decoder(vocab_size=vocab_size, encoder_dim=encoder_dim,
-                             d_model=decoder_dim, num_layers=num_layers)
+        return Mamba3Decoder(
+            vocab_size=vocab_size,
+            encoder_dim=decoder_dim, # memory is already projected to decoder_dim by CaptioningModel.proj
+            d_model=decoder_dim,
+            num_layers=num_layers,
+            max_len=max_len,
+        )
     raise ValueError(f"Unknown decoder: {name!r}. Choose: transformer | mamba | mamba3")
 
 # ─── special tokens ───────────────────────────────────────────────────────────
@@ -322,7 +335,7 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
         images   = images.to(device, non_blocking=True)
         captions = captions.to(device, non_blocking=True)
 
-        with torch.amp.autocast("cuda", enabled=scaler is not None):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             logits  = model(images, captions)
             targets = captions[:, 1:]
             loss = criterion(
@@ -346,7 +359,8 @@ def train_epoch(model, loader, optimizer, criterion, device, vocab, grad_accum=1
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                # Choke the gradient spikes to prevent NaNs in Mamba
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             if scheduler is not None:
@@ -570,7 +584,8 @@ def main():
                   f"fast-forwarded {advance} steps to epoch {start_epoch}.")
 
     # ── Mixed precision scaler (created once, persists across epochs) ────────
-    scaler = GradScaler("cuda") if device.type == "cuda" else None
+    #scaler = GradScaler() if device.type == "cuda" else None
+    scaler = None
 
     # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.epochs):
