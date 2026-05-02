@@ -215,23 +215,65 @@ class Mamba3DecoderBlock(nn.Module):
         return x
 
 
+class Mamba3DecoderBlock(nn.Module):
+    """Hybrid Mamba + Cross-Attention Block"""
+    def __init__(self, d_model=512, num_heads=8, d_state=64, headdim=128,
+                 is_mimo=False, mimo_rank=4, chunk_size=16,
+                 dropout=0.1, dtype=torch.bfloat16):
+        super().__init__()
+        self.norm_ssm = nn.LayerNorm(d_model, dtype=dtype)
+        self.mamba = Mamba3(
+            d_model=d_model,
+            d_state=d_state,
+            headdim=headdim,
+            is_mimo=is_mimo,
+            mimo_rank=mimo_rank,
+            chunk_size=chunk_size,
+            is_outproj_norm=True,
+            dtype=dtype,
+        )
+
+        self.norm_cross = nn.LayerNorm(d_model, dtype=dtype)
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout=dropout, batch_first=True, dtype=dtype
+        )
+
+    def forward(self, x, memory, pad_mask=None):
+        # 1. SSM Text Modeling
+        residual = x
+        x = self.norm_ssm(x)
+        
+        # STOP THE HANG: Zero out the padded regions BEFORE passing to Mamba
+        if pad_mask is not None:
+            x = x * pad_mask 
+            
+        x = residual + self.mamba(x)
+        
+        # 2. Cross-Attention to Image Memory (High CIDEr mechanism)
+        h = self.norm_cross(x)
+        attn_out, _ = self.cross_attn(h, memory, memory)
+        x = x + attn_out
+        
+        return x
+
+
 class Mamba3Decoder(nn.Module):
     def __init__(
         self,
         vocab_size,
-        encoder_dim=768,       # Default output dim of vanilla_vmamba_small
-        d_model=512,           # Dimension of Mamba-3
-        num_heads=8,           # Cross-attention heads
-        d_state=64,            # Mamba-3 state expansion (was 128 — too large for this dataset size)
-        headdim=128,           # Mamba-3 headdim
-        num_layers=6,          # Number of Mamba-3 blocks
-        is_mimo=False,         # Enable MIMO for complex tracking
+        encoder_dim=768,       
+        d_model=512,           
+        num_heads=8,           
+        d_state=64,            
+        headdim=128,           
+        num_layers=6,          
+        is_mimo=False,         
         mimo_rank=4,
         chunk_size=16,
         max_len=128,
         dropout=0.1,
-        dtype=torch.bfloat16,  # Mamba-3 is highly optimized for bf16
-        pad_token_id=0         # Your tokenizer's padding token
+        dtype=torch.bfloat16,  
+        pad_token_id=0         
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -264,31 +306,34 @@ class Mamba3Decoder(nn.Module):
         self.norm_f = nn.LayerNorm(d_model, dtype=dtype)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, dtype=dtype)
 
-        # Weight Tying: Share weights between embedding and output layer (improves training)
         self.lm_head.weight = self.embedding.weight
         nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
+        
+        # STOP THE HANG: Explicitly zero the padding embedding on init
+        with torch.no_grad():
+            self.embedding.weight[self.pad_token_id].fill_(0.0)
 
     def forward(self, image_features, text_input_ids):
-        """
-        Args:
-            image_features: Tensor from VMamba. Can be (B, H, W, C) or (B, num_patches, C).
-            text_input_ids: Tensor of shape (B, seq_len) containing caption token IDs.
-        Returns:
-            logits: Tensor of shape (B, seq_len, vocab_size) predicting the NEXT word.
-        """
         if image_features.dim() == 4:
             B, H, W, C = image_features.shape
             image_features = image_features.view(B, H * W, C)
 
+        # Process Visual Features (Memory)
         image_features = image_features.to(self.dtype)
-        memory = self.visual_norm(self.visual_proj(image_features))  # (B, num_patches, d_model)
+        memory = self.visual_norm(self.visual_proj(image_features))  
 
+        # Process Text 
         text_embeds = self.embedding(text_input_ids)
         text_embeds = text_embeds + self.pos_embedding[:, :text_embeds.size(1)]
 
+        # Create binary mask to prevent Mamba NaN explosions (1 for text, 0 for pad)
+        pad_mask = (text_input_ids != self.pad_token_id).unsqueeze(-1).to(self.dtype)
+
         hidden_states = text_embeds.to(device=image_features.device, dtype=self.dtype).contiguous()
+        
+        # Pass through Hybrid Layers
         for layer in self.layers:
-            hidden_states = layer(hidden_states, memory)
+            hidden_states = layer(hidden_states, memory, pad_mask=pad_mask)
 
         hidden_states = self.norm_f(hidden_states)
         logits = self.lm_head(hidden_states)
@@ -297,29 +342,16 @@ class Mamba3Decoder(nn.Module):
 
     @torch.no_grad()
     def generate(self, image_features, start_token_id, end_token_id, max_length=20):
-        """
-        Basic greedy autoregressive generation loop for inference.
-        Note: For maximum speed in production, you would utilize Mamba's KV-state caching, 
-        but this loop works perfectly for validation and testing.
-        """
         self.eval()
         B = image_features.size(0)
         
-        # Start with the <BOS> token
         generated_ids = torch.full((B, 1), start_token_id, dtype=torch.long, device=image_features.device)
 
         for _ in range(max_length):
-            # Forward pass with the sequence generated so far
             logits = self.forward(image_features, generated_ids)
-            
-            # Get the predicted token (last token in the sequence)
             next_token_logits = logits[:, -1, :]
             next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(1)
-            
-            # Append to generated sequence
             generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
-            
-            # Stop early if all batches generated the <EOS> token
             if (generated_ids == end_token_id).any(dim=1).all():
                 break
                 

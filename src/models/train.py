@@ -40,7 +40,7 @@ import argparse
 import time
 from collections import Counter
 
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
 import torch
 
